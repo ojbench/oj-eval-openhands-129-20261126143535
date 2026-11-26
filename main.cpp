@@ -6,12 +6,12 @@
 using namespace std;
 
 struct VarInfo {
-    string type; // "int" or "string"
+    char type; // 0='int', 1='string'
     string value; // stored as string
 };
 
 // Find variable from innermost to outermost scope
-static VarInfo* findVar(const string& name, vector<unordered_map<string, VarInfo>>& scopes) {
+static inline VarInfo* findVar(const string& name, vector<unordered_map<string, VarInfo>>& scopes) {
     for (int i = (int)scopes.size() - 1; i >= 0; i--) {
         auto it = scopes[i].find(name);
         if (it != scopes[i].end()) {
@@ -21,17 +21,23 @@ static VarInfo* findVar(const string& name, vector<unordered_map<string, VarInfo
     return nullptr;
 }
 
-// Strip surrounding quotes from a string value
-static string stripQuotes(const string& s) {
-    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
-        return s.substr(1, s.size() - 2);
+// Fast integer parsing - returns true if valid integer
+static inline bool parseLongLong(const char* s, long long& out) {
+    const char* p = s;
+    bool neg = false;
+    if (*p == '-') { neg = true; p++; }
+    else if (*p == '+') { p++; }
+    if (*p < '0' || *p > '9') return false;
+    unsigned long long val = 0;
+    while (*p >= '0' && *p <= '9') {
+        val = val * 10 + (*p - '0');
+        p++;
     }
-    return s;
-}
-
-// Check if a string looks like a quoted string literal
-static bool isQuotedString(const string& s) {
-    return s.size() >= 2 && s.front() == '"' && s.back() == '"';
+    // Skip trailing whitespace (\r, \n, etc.)
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != '\0') return false;
+    out = neg ? -(long long)val : (long long)val;
+    return true;
 }
 
 int main() {
@@ -44,131 +50,161 @@ int main() {
     getline(cin, dummy); // consume rest of first line
 
     vector<unordered_map<string, VarInfo>> scopes;
+    scopes.reserve(128);
     scopes.emplace_back(); // global scope
 
     string line;
     while (n--) {
         getline(cin, line);
+        
+        // Remove trailing \r if present (Windows line endings)
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
 
-        // Extract command name (first word)
+        // Find first space to get command
         size_t sp = line.find(' ');
-        string cmd = (sp == string::npos) ? line : line.substr(0, sp);
-
-        if (cmd == "Indent") {
-            scopes.emplace_back();
-
-        } else if (cmd == "Dedent") {
-            if (scopes.size() <= 1) {
-                cout << "Invalid operation\n";
-            } else {
-                scopes.pop_back();
-            }
-
-        } else if (cmd == "Declare") {
-            // Declare [type] [variable_name] [value]
-            string rest = line.substr(sp + 1);
-            size_t p = rest.find(' ');
-            string type = rest.substr(0, p);
-            rest = rest.substr(p + 1);
-            p = rest.find(' ');
-            string varName = rest.substr(0, p);
-            string value = rest.substr(p + 1);
-
-            // Check if variable already in current scope
-            if (scopes.back().count(varName)) {
-                cout << "Invalid operation\n";
-            } else {
-                VarInfo vi;
-                vi.type = type;
-                vi.value = (type == "string") ? stripQuotes(value) : value;
-                scopes.back()[varName] = vi;
-            }
-
-        } else if (cmd == "Add") {
-            // Add [result] [value1] [value2]
-            string rest = line.substr(sp + 1);
-            size_t p = rest.find(' ');
-            string result = rest.substr(0, p);
-            rest = rest.substr(p + 1);
-            p = rest.find(' ');
-            string value1 = rest.substr(0, p);
-            string value2 = rest.substr(p + 1);
-
-            VarInfo* v1 = findVar(value1, scopes);
-            VarInfo* v2 = findVar(value2, scopes);
-            VarInfo* vr = findVar(result, scopes);
-
-            if (!v1 || !v2 || !vr) {
-                cout << "Invalid operation\n";
-            } else if (v1->type != v2->type) {
-                cout << "Invalid operation\n";
-            } else {
-                if (v1->type == "int") {
-                    long long a = stoll(v1->value);
-                    long long b = stoll(v2->value);
-                    vr->value = to_string(a + b);
+        
+        if (sp == string::npos) {
+            // No space - could be Indent or Dedent (no-argument commands)
+            if (line == "Indent") {
+                scopes.emplace_back();
+            } else if (line == "Dedent") {
+                if (scopes.size() <= 1) {
+                    cout << "Invalid operation\n";
                 } else {
-                    vr->value = v1->value + v2->value;
+                    scopes.pop_back();
+                }
+            }
+            // else: unknown command, skip
+            continue;
+        }
+
+        // Command dispatch based on first character
+        char c0 = line[0];
+        
+        if (c0 == 'D') { // Dedent or Declare
+            if (line.size() >= 7 && line[0] == 'D' && line[1] == 'e' && line[2] == 'c' && line[3] == 'l' && line[4] == 'a' && line[5] == 'r' && line[6] == 'e') { // Declare
+                // Declare [type] [variable_name] [value]
+                size_t p1 = sp + 1;
+                size_t p2 = line.find(' ', p1);
+                size_t p3 = line.find(' ', p2 + 1);
+                
+                string type(line.data() + p1, p2 - p1);
+                string varName(line.data() + p2 + 1, p3 - p2 - 1);
+                string value(line.data() + p3 + 1, (int)line.size() - p3 - 1);
+
+                // Check if variable already in current scope
+                if (scopes.back().count(varName)) {
+                    cout << "Invalid operation\n";
+                } else {
+                    VarInfo vi;
+                    vi.type = (type == "string") ? 1 : 0;
+                    vi.value = (type == "string") ? value.substr(1, value.size() - 2) : value;
+                    scopes.back()[varName] = vi;
+                }
+            } else { // Dedent
+                if (scopes.size() <= 1) {
+                    cout << "Invalid operation\n";
+                } else {
+                    scopes.pop_back();
                 }
             }
 
-        } else if (cmd == "SelfAdd") {
-            // SelfAdd [variable_name] [value]  OR  SelfAdd [type] [variable_name] [value]
-            string rest = line.substr(sp + 1);
-            size_t p = rest.find(' ');
-            string first = rest.substr(0, p);
+        } else if (c0 == 'A') { // Add
+            // Add [result] [value1] [value2]
+            size_t p1 = sp + 1;
+            size_t p2 = line.find(' ', p1);
+            size_t p3 = line.find(' ', p2 + 1);
+            
+            string rstr(line.data() + p1, p2 - p1);
+            string v1str(line.data() + p2 + 1, p3 - p2 - 1);
+            string v2str(line.data() + p3 + 1, (int)line.size() - p3 - 1);
 
-            // Determine if type-prefixed: first token is "int"/"string" AND there's a second space
+            VarInfo* vr = findVar(rstr, scopes);
+            VarInfo* v1 = findVar(v1str, scopes);
+            VarInfo* v2 = findVar(v2str, scopes);
+
+            if (!v1 || !v2 || !vr) {
+                cout << "Invalid operation\n";
+            } else if (v1->type != v2->type || v1->type != vr->type) {
+                cout << "Invalid operation\n";
+            } else if (v1->type == 0) { // int
+                long long a, b;
+                if (!parseLongLong(v1->value.c_str(), a) || !parseLongLong(v2->value.c_str(), b)) {
+                    cout << "Invalid operation\n";
+                } else {
+                    vr->value = to_string(a + b);
+                }
+            } else { // string
+                vr->value = v1->value + v2->value;
+            }
+
+        } else if (c0 == 'S') { // SelfAdd
+            // SelfAdd [variable_name] [value]  OR  SelfAdd [type] [variable_name] [value]
+            size_t p1 = sp + 1;
+            size_t p2 = line.find(' ', p1);
+            
+            string first(line.data() + p1, p2 - p1);
+            
             bool typePrefixed = false;
-            string afterFirst;
-            size_t p2 = string::npos;
-            if ((first == "int" || first == "string")) {
-                afterFirst = rest.substr(p + 1);
-                p2 = afterFirst.find(' ');
-                if (p2 != string::npos) {
+            if (first == "int" || first == "string") {
+                size_t p3 = line.find(' ', p2 + 1);
+                if (p3 != string::npos) {
                     typePrefixed = true;
                 }
             }
 
             if (typePrefixed) {
-                // Type-prefixed form: SelfAdd [type] [variable_name] [value]
-                string varName = afterFirst.substr(0, p2);
-                string value = afterFirst.substr(p2 + 1);
-
-                VarInfo* v = findVar(varName, scopes);
+                size_t p3 = line.find(' ', p2 + 1);
+                string nstr(line.data() + p2 + 1, p3 - p2 - 1);
+                string vstr(line.data() + p3 + 1, (int)line.size() - p3 - 1);
+                
+                VarInfo* v = findVar(nstr, scopes);
                 if (!v) {
                     cout << "Invalid operation\n";
-                } else if (v->type != first) {
+                } else if (v->type == 0 && first != "int") {
+                    cout << "Invalid operation\n";
+                } else if (v->type == 1 && first != "string") {
                     cout << "Invalid operation\n";
                 } else {
-                    if (v->type == "int") {
-                        long long a = stoll(v->value);
-                        long long b = stoll(value);
-                        v->value = to_string(a + b);
-                    } else {
-                        v->value += stripQuotes(value);
-                    }
-                }
-            } else {
-                // Non-type-prefixed form: SelfAdd [variable_name] [value]
-                string varName = first;
-                string value = rest.substr(p + 1);
-
-                VarInfo* v = findVar(varName, scopes);
-                if (!v) {
-                    cout << "Invalid operation\n";
-                } else {
-                    if (v->type == "int") {
-                        if (!isQuotedString(value)) {
-                            long long a = stoll(v->value);
-                            long long b = stoll(value);
+                    if (v->type == 0) { // int
+                        long long a, b;
+                        if (!parseLongLong(v->value.c_str(), a) || !parseLongLong(vstr.c_str(), b)) {
+                            cout << "Invalid operation\n";
+                        } else {
                             v->value = to_string(a + b);
+                        }
+                    } else { // string
+                        if (vstr.size() >= 2 && vstr.front() == '"' && vstr.back() == '"') {
+                            v->value += vstr.substr(1, vstr.size() - 2);
                         } else {
                             cout << "Invalid operation\n";
                         }
-                    } else {
-                        if (isQuotedString(value)) {
-                            v->value += stripQuotes(value);
+                    }
+                }
+            } else {
+                string nstr(first);
+                string vstr(line.data() + p2 + 1);
+                
+                VarInfo* v = findVar(nstr, scopes);
+                if (!v) {
+                    cout << "Invalid operation\n";
+                } else {
+                    if (v->type == 0) { // int
+                        if (vstr.size() >= 2 && vstr.front() == '"' && vstr.back() == '"') {
+                            cout << "Invalid operation\n";
+                        } else {
+                            long long a, b;
+                            if (!parseLongLong(v->value.c_str(), a) || !parseLongLong(vstr.c_str(), b)) {
+                                cout << "Invalid operation\n";
+                            } else {
+                                v->value = to_string(a + b);
+                            }
+                        }
+                    } else { // string
+                        if (vstr.size() >= 2 && vstr.front() == '"' && vstr.back() == '"') {
+                            v->value += vstr.substr(1, vstr.size() - 2);
                         } else {
                             cout << "Invalid operation\n";
                         }
@@ -176,17 +212,16 @@ int main() {
                 }
             }
 
-        } else if (cmd == "Print") {
-            // Print [variable_name]
-            string varName = line.substr(sp + 1);
-
-            VarInfo* v = findVar(varName, scopes);
+        } else if (c0 == 'P') { // Print
+            string nstr(line.data() + sp + 1);
+            VarInfo* v = findVar(nstr, scopes);
             if (!v) {
                 cout << "Invalid operation\n";
             } else {
-                cout << varName << ":" << v->value << "\n";
+                cout << nstr << ":" << v->value << "\n";
             }
         }
+        // else: unknown command, skip
     }
 
     return 0;
